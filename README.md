@@ -1,5 +1,9 @@
 # @smaltdb/io
 
+<a href="https://smaltworks.dev/stability"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stenhoor/smalt-brand/main/badges/work-in-progress-on-dark.svg"><img alt="Work in progress. Come build with us." src="https://raw.githubusercontent.com/stenhoor/smalt-brand/main/badges/work-in-progress.svg" height="56"></picture></a>
+
+[Writing plugins](https://smaltdb.dev/reference/api/plugins) · [smaltworks.dev](https://smaltworks.dev/products/plugins)
+
 CSV, TSV and JSON for [smaltdb](https://github.com/stenhoor/smaltdb): the `csv`, `tsv` and `json` (`ndjson`, `jsonl`)
 formats for external tables, `read_csv()` and `read_json()`, and CSV / JSON import and export. No dependencies.
 
@@ -45,3 +49,7 @@ npm run check            # type-check and test
 ```
 
 See [CLAUDE.md](CLAUDE.md) for how the pins work.
+
+<a href="https://smaltworks.dev"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stenhoor/smalt-brand/main/badges/a-smaltworks-project-on-dark.svg"><img alt="A smaltworks project" src="https://raw.githubusercontent.com/stenhoor/smalt-brand/main/badges/a-smaltworks-project.svg" height="28"></picture></a>
+
+MIT License.
