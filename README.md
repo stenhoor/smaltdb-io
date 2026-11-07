@@ -28,7 +28,8 @@ await importCSV(db, 'people', file, { create: true }); // a string, Uint8Array, 
 const csv = await exportCSV(db, 'SELECT * FROM people WHERE age > ?', [30]);
 ```
 
-`importJSON` and `exportJSON` work the same way. Reading files with `read_csv()` / `read_json()` also needs a source,
+`importJSON` and `exportJSON` work the same way. Import and export need no language: import writes through plans, and
+export also takes a plan statement (`PlanStatementInput` from `smaltdb/engine`) in place of the SQL query. Reading files with `read_csv()` / `read_json()` also needs a source,
 such as `@smaltdb/external`.
 
 With the in-process engine (Node): `Database.openMemory({ plugins: [io] })` from `smaltdb/engine`; the helpers take

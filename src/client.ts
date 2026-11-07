@@ -3,6 +3,7 @@
  * `Database` (from `smaltdb`) or an engine `Database` (from `smaltdb/engine`) with the plugin
  * installed. Imports nothing from smaltdb at run time.
  */
+import type { PlanStatementInput } from 'smaltdb/engine';
 import type { CsvExportOptions, CsvImportOptions, ExportParams, ImportSource, JsonExportOptions, JsonImportOptions } from './options.js';
 
 export type { CsvExportOptions, CsvImportOptions, ExportParams, ImportSource, JsonExportOptions, JsonImportOptions, ParamValue } from './options.js';
@@ -29,12 +30,16 @@ export async function importJSON(db: PluginCaller, table: string, source: Import
   return (await db.callPlugin(PLUGIN, 'importJSON', [table, source, options], { lock: true })) as { rows: number };
 }
 
-/** Run a query and return its result as CSV text (header row first by default). */
-export async function exportCSV(db: PluginCaller, sql: string, params?: ExportParams, options: CsvExportOptions = {}): Promise<string> {
-  return (await db.callPlugin(PLUGIN, 'exportCSV', [sql, params ?? null, options], { lock: true })) as string;
+/**
+ * Run a query and return its result as CSV text (header row first by default). The query is SQL text (with SQL
+ * registered) or a statement given as plan data (`queryPlan`'s form; its parameters are an array), which needs no
+ * language.
+ */
+export async function exportCSV(db: PluginCaller, query: string | PlanStatementInput, params?: ExportParams, options: CsvExportOptions = {}): Promise<string> {
+  return (await db.callPlugin(PLUGIN, 'exportCSV', [query, params ?? null, options], { lock: true })) as string;
 }
 
-/** Run a query and return its result as a JSON array of objects (or NDJSON with `{ format: 'ndjson' }`). */
-export async function exportJSON(db: PluginCaller, sql: string, params?: ExportParams, options: JsonExportOptions = {}): Promise<string> {
-  return (await db.callPlugin(PLUGIN, 'exportJSON', [sql, params ?? null, options], { lock: true })) as string;
+/** Run a query and return its result as a JSON array of objects (or NDJSON with `{ format: 'ndjson' }`); see {@link exportCSV}. */
+export async function exportJSON(db: PluginCaller, query: string | PlanStatementInput, params?: ExportParams, options: JsonExportOptions = {}): Promise<string> {
+  return (await db.callPlugin(PLUGIN, 'exportJSON', [query, params ?? null, options], { lock: true })) as string;
 }

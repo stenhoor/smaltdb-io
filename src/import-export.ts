@@ -1,13 +1,20 @@
 /**
  * CSV and JSON / NDJSON import and export. Runs inside the engine (worker), so rows never cross the
- * message boundary one by one: imports go through one prepared INSERT in a single transaction (all
+ * message boundary one by one: imports go through one prepared write in a single transaction (all
  * constraints, conversions and foreign keys apply), exports format query results.
+ *
+ * Imports are plans, not SQL text (smaltdb ADR 0017): the table, the writes and the transaction are plan statements,
+ * so they work with no language registered. Exports run a query given as SQL text or as a plan statement.
  */
-import type { Database, MethodContext, SqlValue } from 'smaltdb/engine';
+import type { Database, MethodContext, PlanStatementInput, SqlValue } from 'smaltdb/engine';
 import type { CsvExportOptions, CsvImportOptions, ExportParams, ImportSource, JsonExportOptions, JsonImportOptions } from './options.js';
 import { type Field, IoError, csvRecords, inferType, jsonValue, numericOrText, parseJson } from './text.js';
 
-const q = (name: string): string => '"' + name.replace(/"/g, '""') + '"';
+/** Run a statement given as plan data. */
+const runPlan = (db: Database, stmt: PlanStatementInput, params?: SqlValue[]): void => void db.preparePlan(stmt).run(params);
+
+/** The savepoint an import inside the caller's transaction runs in. */
+const SAVEPOINT = 'smaltdb_import';
 
 /** An import source as text (bytes and blobs are UTF-8). */
 export async function sourceText(source: ImportSource): Promise<string> {
@@ -48,17 +55,17 @@ type Row = { values: SqlValue[]; where: string; present?: boolean[] };
  */
 function load(db: Database, table: string, columns: string[], rows: Iterable<Row>, create: boolean, sample: SqlValue[][]): number {
   const own = !db.inTransaction;
-  db.exec(own ? 'BEGIN' : 'SAVEPOINT smaltdb_import');
+  runPlan(db, own ? { kind: 'transaction', action: 'begin', mode: 'deferred' } : { kind: 'transaction', action: 'savepoint', name: SAVEPOINT });
   try {
     const n = loadRows(db, table, columns, rows, create, sample);
-    db.exec(own ? 'COMMIT' : 'RELEASE smaltdb_import');
+    runPlan(db, own ? { kind: 'transaction', action: 'commit' } : { kind: 'transaction', action: 'release', name: SAVEPOINT });
     return n;
   } catch (e) {
     if (own) {
-      if (db.inTransaction) db.exec('ROLLBACK');
+      if (db.inTransaction) runPlan(db, { kind: 'transaction', action: 'rollback' });
     } else {
-      db.exec('ROLLBACK TO smaltdb_import');
-      db.exec('RELEASE smaltdb_import');
+      runPlan(db, { kind: 'transaction', action: 'rollback', savepoint: SAVEPOINT });
+      runPlan(db, { kind: 'transaction', action: 'release', name: SAVEPOINT });
     }
     throw e;
   }
@@ -68,8 +75,12 @@ function loadRows(db: Database, table: string, columns: string[], rows: Iterable
   let t = db.getTable(table);
   if (!t) {
     if (!create) throw new IoError('SMALT_ERROR', `no such table: ${table}`);
-    const defs = columns.map((c, i) => `${q(c)} ${inferType(sample.map((r) => r[i] ?? null))}`);
-    db.exec(`CREATE TABLE ${q(table)}(${defs.join(', ')})`);
+    // A table with the inferred column types, defined without source text: it belongs to no language.
+    const defs = columns.map((c, i) => {
+      const type = inferType(sample.map((r) => r[i] ?? null)) as 'INTEGER' | 'REAL' | 'TEXT' | 'BLOB' | 'ANY' | 'NUMERIC';
+      return { name: c, declaredType: type, type, notNull: false, collation: 'binary' as const };
+    });
+    runPlan(db, { kind: 'schema', op: { op: 'createTable', table: { name: table, columns: defs, keys: [], checks: [], foreignKeys: [], storage: 'row' }, temp: false, ifNotExists: false } });
     t = db.getTable(table)!;
   }
   const idx = columns.map((c) => {
@@ -79,15 +90,18 @@ function loadRows(db: Database, table: string, columns: string[], rows: Iterable
   });
   // ANY / NUMERIC columns get numbers for numeric-looking text (typed columns convert on their own).
   const loose = idx.map((i) => t!.columns[i].type === 'ANY' || t!.columns[i].type === 'NUMERIC');
-  // One INSERT per set of present columns (absent JSON keys take the column DEFAULT, not NULL).
-  const statements = new Map<string, ReturnType<Database['prepare']>>();
-  const stmtFor = (present: boolean[] | undefined): { st: ReturnType<Database['prepare']>; pick: number[] } => {
+  // One prepared write per set of present columns (absent JSON keys take the column DEFAULT, not NULL): a row of
+  // parameters appended to those columns, or a row of defaults.
+  const target = t.temp ? 'temp' : 'main';
+  const statements = new Map<string, ReturnType<Database['preparePlan']>>();
+  const stmtFor = (present: boolean[] | undefined): { st: ReturnType<Database['preparePlan']>; pick: number[] } => {
     const pick = present ? idx.flatMap((_, k) => (present[k] ? [k] : [])) : idx.map((_, k) => k);
     const key = pick.join(',');
     let st = statements.get(key);
     if (!st) {
-      const cols = pick.map((k) => q(t!.columns[idx[k]].name));
-      st = db.prepare(cols.length ? `INSERT INTO ${q(t!.name)}(${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})` : `INSERT INTO ${q(t!.name)} DEFAULT VALUES`);
+      const row = pick.map((_, i) => ({ k: 'param' as const, index: i, type: 'any' as const }));
+      const input = pick.length ? { op: 'values' as const, rows: [row], types: pick.map(() => 'any' as const) } : null;
+      st = db.preparePlan({ kind: 'write', plan: { op: 'append', table: t!.name, db: target, input, columns: pick.map((k) => idx[k]), upserts: [] } });
       statements.set(key, st);
     }
     return { st, pick };
@@ -213,18 +227,27 @@ interface TypedResult {
   real: boolean[];
 }
 
-/** Run `sql` through the engine (sources of external data are fetched first). */
-async function typedResult(ctx: MethodContext, sql: string, params?: ExportParams): Promise<TypedResult> {
-  const r = await ctx.query(sql, params as Parameters<MethodContext['query']>[1]);
+/**
+ * Run a query through the engine (sources of external data are fetched first): SQL text, which needs SQL registered,
+ * or a statement given as plan data, which needs no language. A plan's parameters are positional.
+ */
+async function typedResult(ctx: MethodContext, query: string | PlanStatementInput, params?: ExportParams): Promise<TypedResult> {
+  let r: Awaited<ReturnType<MethodContext['query']>>;
+  if (typeof query === 'string') r = await ctx.query(query, params as Parameters<MethodContext['query']>[1]);
+  else {
+    if (!ctx.queryPlan) throw new IoError('SMALT_MISUSE', 'exporting a plan needs smaltdb 0.9.0 or later');
+    if (params !== undefined && !Array.isArray(params)) throw new IoError('SMALT_RANGE', "a plan's parameters are positional: give them as an array");
+    r = await ctx.queryPlan(query, params as SqlValue[] | undefined);
+  }
   return { columns: r.columns, rows: r.rows, real: r.columnTypes.map((t) => t === 'real') };
 }
 
-export async function exportCSV(ctx: MethodContext, formatReal: (v: number) => string, sql: string, params?: ExportParams, opts: CsvExportOptions = {}): Promise<string> {
-  return formatCSV(await typedResult(ctx, sql, params), opts, formatReal);
+export async function exportCSV(ctx: MethodContext, formatReal: (v: number) => string, query: string | PlanStatementInput, params?: ExportParams, opts: CsvExportOptions = {}): Promise<string> {
+  return formatCSV(await typedResult(ctx, query, params), opts, formatReal);
 }
 
-export async function exportJSON(ctx: MethodContext, formatReal: (v: number) => string, sql: string, params?: ExportParams, opts: JsonExportOptions = {}): Promise<string> {
-  return formatJSON(await typedResult(ctx, sql, params), opts, formatReal);
+export async function exportJSON(ctx: MethodContext, formatReal: (v: number) => string, query: string | PlanStatementInput, params?: ExportParams, opts: JsonExportOptions = {}): Promise<string> {
+  return formatJSON(await typedResult(ctx, query, params), opts, formatReal);
 }
 
 function formatCSV(res: TypedResult, opts: CsvExportOptions, formatReal: (v: number) => string): string {
