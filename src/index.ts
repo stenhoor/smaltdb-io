@@ -5,7 +5,7 @@
  * Import and export are plugin methods (`importCSV`, `importJSON`, `exportCSV`, `exportJSON`),
  * called with the helpers in `@smaltdb/io/client` or `db.callPlugin('@smaltdb/io', …)`.
  */
-import type { SmaltPlugin } from 'smaltdb/engine';
+import type { PlanStatementInput, SmaltPlugin } from 'smaltdb/engine';
 import { decode, readCsv, readJson } from './formats.js';
 import { exportCSV, exportJSON, importCSV, importJSON, importText } from './import-export.js';
 import type { CsvExportOptions, CsvImportOptions, ExportParams, ImportSource, JsonExportOptions, JsonImportOptions } from './options.js';
@@ -38,8 +38,8 @@ const io: SmaltPlugin = {
 
     host.addMethod('importCSV', async (ctx, [table, source, options]) => importCSV(ctx.db, table as string, await importText(ctx, source as ImportSource), (options ?? {}) as CsvImportOptions));
     host.addMethod('importJSON', async (ctx, [table, source, options]) => importJSON(ctx.db, table as string, await importText(ctx, source as ImportSource), (options ?? {}) as JsonImportOptions));
-    host.addMethod('exportCSV', (ctx, [sql, params, options]) => exportCSV(ctx, host.formatReal, sql as string, (params ?? undefined) as ExportParams | undefined, (options ?? {}) as CsvExportOptions));
-    host.addMethod('exportJSON', (ctx, [sql, params, options]) => exportJSON(ctx, host.formatReal, sql as string, (params ?? undefined) as ExportParams | undefined, (options ?? {}) as JsonExportOptions));
+    host.addMethod('exportCSV', (ctx, [query, params, options]) => exportCSV(ctx, host.formatReal, query as string | PlanStatementInput, (params ?? undefined) as ExportParams | undefined, (options ?? {}) as CsvExportOptions));
+    host.addMethod('exportJSON', (ctx, [query, params, options]) => exportJSON(ctx, host.formatReal, query as string | PlanStatementInput, (params ?? undefined) as ExportParams | undefined, (options ?? {}) as JsonExportOptions));
   },
 };
 export default io;

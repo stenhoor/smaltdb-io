@@ -5,10 +5,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import io from '../src/index.js';
 import { exportCSV, exportJSON, importCSV, importJSON } from '../src/client.js';
 import * as client from 'smaltdb';
-import { Database, MemoryVfs } from 'smaltdb/engine';
+import { Database, MemoryVfs, plan as p, type PlanStatementInput } from 'smaltdb/engine';
 import { EngineServer } from 'smaltdb-src/engine/server.js';
 import type { Request, Response } from 'smaltdb-src/shared/protocol.js';
 import { until } from './helpers/wait.js';
+
+const pragmaTypes = (d: Database, table: string): unknown[][] =>
+  d.query(`SELECT name, type FROM pragma_table_info('${table}') ORDER BY cid`).rows;
 
 const db = (): Database => Database.openFile(new MemoryVfs().openSync('io.db'), { plugins: [io] });
 
@@ -37,7 +40,9 @@ describe('CSV import', () => {
   it('creates tables with inferred types, supports delimiters and headerless input', async () => {
     const d = db();
     await importCSV(d, 'm', 'a;b;c;d\n1;2.5;x;\n-3;4;y;\n9007199254740993;1e3;z;\n', { delimiter: ';', create: true });
-    expect(d.query("SELECT sql FROM sqlite_schema WHERE name = 'm'").rows).toEqual([['CREATE TABLE "m"("a" INTEGER, "b" REAL, "c" TEXT, "d" TEXT)']]);
+    // Created as a plan with no source text, so the catalog shows the engine's description (smaltdb ADR 0017).
+    expect(pragmaTypes(d, 'm')).toEqual([['a', 'INTEGER'], ['b', 'REAL'], ['c', 'TEXT'], ['d', 'TEXT']]);
+    expect(JSON.parse(d.query("SELECT sql FROM sqlite_schema WHERE name = 'm'").rows[0]![0] as string)).toMatchObject({ kind: 'table', table: { name: 'm' } });
     expect(d.query('SELECT a, typeof(a), b, c, d FROM m ORDER BY rowid').rows).toEqual([
       [1, 'integer', 2.5, 'x', null],
       [-3, 'integer', 4, 'y', null],
@@ -50,7 +55,7 @@ describe('CSV import', () => {
   it('reports the failing line and rolls the whole import back', async () => {
     const d = db();
     d.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v INT NOT NULL)');
-    await expect(importCSV(d, 't', 'id,v\n1,10\n2,\n3,30\n')).rejects.toThrow(/CSV line 3: NOT NULL constraint failed: t.v/);
+    await expect(importCSV(d, 't', 'id,v\n1,10\n2,\n3,30\n')).rejects.toMatchObject({ code: 'SMALT_CONSTRAINT_NOTNULL', message: 'CSV line 3: t.v must not be null' });
     await expect(importCSV(d, 't', 'id,v\n1,10\n2,abc\n')).rejects.toThrow(/CSV line 3: cannot store TEXT value in INTEGER column t.v/);
     await expect(importCSV(d, 't', 'id,v\n1,10,99\n')).rejects.toThrow(/CSV line 2: expected 2 fields but found 3/);
     await expect(importCSV(d, 't', 'id,v\n1,"10\n')).rejects.toThrow(/CSV line 2: unterminated quoted field/);
@@ -96,9 +101,9 @@ describe('JSON import', () => {
       [7, 'misc', null, null],
     ]);
     await expect(importJSON(d, 'e', '{"id":8}\n{bad}\n')).rejects.toThrow(/NDJSON line 2/);
-    await expect(importJSON(d, 'e', '[{"id":1}]')).rejects.toThrow(/JSON item 1: UNIQUE constraint failed: e.id/);
+    await expect(importJSON(d, 'e', '[{"id":1}]')).rejects.toMatchObject({ code: 'SMALT_CONSTRAINT_PRIMARYKEY', message: 'JSON item 1: duplicate primary key in e (id)' });
     await importJSON(d, 'auto', '[{"n":1,"s":"x","r":1.5},{"n":2,"s":"y","r":2}]', { create: true });
-    expect(d.query("SELECT sql FROM sqlite_schema WHERE name = 'auto'").rows).toEqual([['CREATE TABLE "auto"("n" INTEGER, "s" TEXT, "r" REAL)']]);
+    expect(pragmaTypes(d, 'auto')).toEqual([['n', 'INTEGER'], ['s', 'TEXT'], ['r', 'REAL']]);
   });
 
   it('says which item is wrong', async () => {
@@ -199,6 +204,23 @@ describe('export', () => {
     expect(d3.query('SELECT * FROM copy ORDER BY id').rows).toEqual(d.query('SELECT id, s FROM t ORDER BY id').rows);
   });
 
+  it('a plan statement as the query, in-process and through the client', async () => {
+    // id, s, ? ORDER BY id: export reaches no language when given a plan (smaltdb ADR 0017).
+    const query: PlanStatementInput = {
+      kind: 'query',
+      plan: p.sort(p.project(p.scan('t', [0, 1]), [p.col(0, 0, 'int'), p.col(0, 1, 'text'), p.param(0, 'text')]), [p.asc(p.col(0, 0, 'int'))]),
+      columns: [{ name: 'id', type: 'int' }, { name: 's', type: 'text' }, { name: 'tag', type: 'text' }],
+    };
+    const d = db();
+    d.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT); INSERT INTO t VALUES (2, 'b'), (1, 'a,1')");
+    expect(await exportCSV(d, query, ['x'])).toBe('id,s,tag\n1,"a,1",x\n2,b,x\n');
+    expect(await exportJSON(d, query, ['y'], { format: 'ndjson' })).toBe('{"id":1,"s":"a,1","tag":"y"}\n{"id":2,"s":"b","tag":"y"}\n');
+    const c = await openClient();
+    await c.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT); INSERT INTO t VALUES (2, 'b'), (1, 'a,1')");
+    expect(await exportCSV(c, query, ['z'])).toBe('id,s,tag\n1,"a,1",z\n2,b,z\n');
+    expect(await exportJSON(c, query, ['z'])).toBe('[{"id":1,"s":"a,1","tag":"z"},{"id":2,"s":"b","tag":"z"}]');
+  });
+
   it('through the client, with db.callPlugin', async () => {
     const c = await openClient();
     expect(await importCSV(c, 'people', new Blob(['id,name,age\n1,"Lee, A",31\n2,Kim,\n']), { create: true })).toEqual({ rows: 2 });
@@ -250,7 +272,7 @@ describe('review of #38', () => {
     expect(bad).toMatchObject({ code: 'SMALT_ERROR', message: 'CSV line 2: expected 2 fields but found 1' });
     const constraint = await importCSV(c, 'p', 'id,v\n1,\n').catch((e: unknown) => e);
     expect(constraint).toBeInstanceOf(client.SmaltdbError);
-    expect(constraint).toMatchObject({ code: 'SMALT_CONSTRAINT_NOTNULL', message: 'CSV line 2: NOT NULL constraint failed: p.v' });
+    expect(constraint).toMatchObject({ code: 'SMALT_CONSTRAINT_NOTNULL', message: 'CSV line 2: p.v must not be null' });
     // In-process the plugin's own errors carry the code (they are not SmaltErrors: plugins cannot make one).
     const d = db();
     d.exec('CREATE TABLE p(id INTEGER PRIMARY KEY, v TEXT NOT NULL)');

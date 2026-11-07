@@ -1,4 +1,4 @@
 {
-  "smaltdb": { "repo": "stenhoor/smaltdb", "ref": "7a9cd3c442963113dfa21d34918e1c791e70f671" },
-  "smaltql": { "repo": "stenhoor/smaltql", "ref": "5346ef59561ba7d80f6f516ff956f7280cd4ba9f" }
+  "smaltdb": { "repo": "stenhoor/smaltdb", "ref": "52d853cd07d31e2cb562b3d5165ed1c089cfcb64" },
+  "smaltql": { "repo": "stenhoor/smaltql", "ref": "32c3de072f2b92dc27545ba2735271ff33d73630" }
 }
